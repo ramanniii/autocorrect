@@ -9,15 +9,57 @@ from pathlib import Path
 LAST_USED_FILE = Path.home() / ".ollama_last_used"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-#MODEL = "mistral"
 MODEL = "mistral:instruct"
 OLLAMA_BIN = "/opt/homebrew/bin/ollama"
+
+
+# -------------------------
+# MODE LOADING FROM FILE
+# -------------------------
+def get_mode():
+    mode_file = Path.home() / ".autocorrect_mode"
+    try:
+        return mode_file.read_text().strip()
+    except:
+        return "technical"
+
+
+def get_mode_rules(mode):
+    if mode == "technical":
+        return """
+MODE: TECHNICAL WRITING
+- Preserve developer abbreviations.
+- Do NOT expand: env, prod, repo, var, config, auth, db, api, ui.
+- Treat them as intentional words.
+- Minimal edits preferred.
+"""
+    elif mode == "casual":
+        return """
+MODE: CASUAL CHAT
+- Preserve slang and informal tone.
+- Allow: lol, idk, omg, ahaha.
+- Fix spelling and obvious grammar only.
+- Do NOT formalise.
+"""
+    elif mode == "formal":
+        return """
+MODE: FORMAL WRITING
+- Remove slang.
+- Expand abbreviations where appropriate.
+- Use professional tone.
+- Structured sentences preferred.
+"""
+    else:
+        return ""
+
 
 PROMPT_TEMPLATE = """
 You are a text repair tool.
 
 If the input is already correct and natural, output exactly:
 <<NO_CHANGE>>
+
+{}
 
 STRICT BEHAVIOUR MODES:
 
@@ -49,6 +91,7 @@ TECHNICAL TERMS:
 - Do NOT expand abbreviations commonly used in software/dev contexts.
 - Preserve terms like: env, prod, repo, var, config, auth, db, api, ui.
 - Treat them as correct words.
+
 INPUT:
 {}
 OUTPUT:
@@ -56,7 +99,6 @@ OUTPUT:
 
 
 def is_model_running():
-    """Check if the Ollama model is currently loaded."""
     try:
         result = subprocess.run(
             [OLLAMA_BIN, "ps"],
@@ -70,16 +112,12 @@ def is_model_running():
 
 
 def start_model():
-    """Start Ollama server and warm the model (non-interactive)."""
-    print("Starting Ollama server...")
-
     subprocess.Popen(
         [OLLAMA_BIN, "serve"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
 
-    # Wait until server responds
     for _ in range(60):
         try:
             requests.get("http://localhost:11434")
@@ -87,9 +125,6 @@ def start_model():
         except:
             time.sleep(0.25)
 
-    print("Server ready. Ensuring model loaded...")
-
-    # Warm model through API (avoids interactive 'ollama run')
     try:
         requests.post(
             OLLAMA_URL,
@@ -108,16 +143,15 @@ def ensure_model_ready():
     if not is_model_running():
         start_model()
 
+
 def split_sentences(text):
-    """
-    Splits text into sentences while preserving punctuation.
-    Simple, fast, good enough for autocorrect stage.
-    """
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     return [s for s in sentences if s]
 
+
 def correct_sentence(sentence):
-    prompt = PROMPT_TEMPLATE.format(sentence)
+    mode = get_mode()
+    prompt = PROMPT_TEMPLATE.format(get_mode_rules(mode), sentence)
 
     response = requests.post(
         OLLAMA_URL,
@@ -136,33 +170,14 @@ def correct_sentence(sentence):
     else:
         return rewritten, True
 
-def classify_sentence(sentence):
-    words = sentence.split()
 
-    # single word
-    if len(words) == 1:
-        return "spelling"
-
-    # many typos / broken structure indicators
-    if (
-        sentence.islower()
-        and "." not in sentence
-        and "," not in sentence
-        and len(words) > 6
-    ):
-        return "rewrite"
-
-    # default path
-    return "grammar"
-    
 def rewrite_text():
-    print("REWRITE TRIGGERED")
+    mode = get_mode()
+    print(f"REWRITE TRIGGERED [{mode}]")
 
     try:
-        # Save clipboard BEFORE we modify anything
         previous_clipboard = pyperclip.paste()
 
-        # Copy highlighted text
         subprocess.run([
             "osascript",
             "-e",
@@ -172,17 +187,13 @@ def rewrite_text():
         time.sleep(0.35)
 
         original_text = pyperclip.paste()
-        text_stripped = original_text.strip()
-        is_single_word = len(text_stripped.split()) == 1
 
         if not original_text or not original_text.strip():
             print("No text selected.")
             return
 
-        # Ensure model is running BEFORE sending request
         ensure_model_ready()
 
-        # Update last used timestamp
         LAST_USED_FILE.write_text(str(time.time()))
 
         sentences = split_sentences(original_text)
@@ -196,30 +207,15 @@ def rewrite_text():
             if changed:
                 any_changes = True
 
-        # rebuild paragraph
         rewritten = " ".join(corrected_sentences)
 
         if not any_changes:
-            print("NO_CHANGE")
             rewritten = original_text
-        else:
-            print("CHANGED")
-
-                # Model says "no changes needed" -> paste original text back
-        if rewritten == "<<NO_CHANGE>>":
-                    print("NO_CHANGE")
-                    rewritten = original_text
-        else:
-            # Optional safety: if the model returns empty for any reason, don't clobber text
-            if not rewritten.strip():
-                rewritten = original_text
 
         pyperclip.copy(rewritten)
 
-        # Give macOS time to register clipboard change
         time.sleep(0.6)
 
-        # Paste into the frontmost application
         subprocess.run([
             "osascript",
             "-e",
@@ -232,10 +228,8 @@ def rewrite_text():
             '''
         ])
 
-        # Allow paste to complete BEFORE restoring clipboard
         time.sleep(0.8)
 
-        # Restore user's previous clipboard content
         pyperclip.copy(previous_clipboard)
 
     except Exception as e:
