@@ -2,6 +2,7 @@ import requests
 import pyperclip
 import subprocess
 import time
+import re
 
 from pathlib import Path
 
@@ -13,9 +14,10 @@ MODEL = "mistral:instruct"
 OLLAMA_BIN = "/opt/homebrew/bin/ollama"
 
 PROMPT_TEMPLATE = """
-YYou are a text repair tool.
+You are a text repair tool.
 
-Correct the input text so it reads like something a person meant to type.
+If the input is already correct and natural, output exactly:
+<<NO_CHANGE>>
 
 STRICT BEHAVIOUR MODES:
 
@@ -24,7 +26,7 @@ STRICT BEHAVIOUR MODES:
 - Do NOT change casing.
 - Do NOT capitalise the first letter.
 - Do NOT add punctuation.
-- Output exactly one word.
+- Output exactly one word OR <<NO_CHANGE>>.
 
 2) If the input is MULTIPLE WORDS:
 - Fix spelling.
@@ -36,12 +38,17 @@ STRICT BEHAVIOUR MODES:
 - Preserve tone.
 - Do NOT respond conversationally.
 - Do NOT explain anything.
+- If no changes are needed, output <<NO_CHANGE>>.
 
 GLOBAL RULES:
-- Output ONLY the corrected sentence, paragraph, or word.
+- Output ONLY the corrected text OR <<NO_CHANGE>>.
 - No commentary.
 - No extra formatting.
 
+TECHNICAL TERMS:
+- Do NOT expand abbreviations commonly used in software/dev contexts.
+- Preserve terms like: env, prod, repo, var, config, auth, db, api, ui.
+- Treat them as correct words.
 INPUT:
 {}
 OUTPUT:
@@ -101,7 +108,53 @@ def ensure_model_ready():
     if not is_model_running():
         start_model()
 
+def split_sentences(text):
+    """
+    Splits text into sentences while preserving punctuation.
+    Simple, fast, good enough for autocorrect stage.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s for s in sentences if s]
 
+def correct_sentence(sentence):
+    prompt = PROMPT_TEMPLATE.format(sentence)
+
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False
+        },
+        timeout=60
+    )
+
+    rewritten = response.json().get("response", "").strip()
+
+    if rewritten == "<<NO_CHANGE>>" or not rewritten:
+        return sentence, False
+    else:
+        return rewritten, True
+
+def classify_sentence(sentence):
+    words = sentence.split()
+
+    # single word
+    if len(words) == 1:
+        return "spelling"
+
+    # many typos / broken structure indicators
+    if (
+        sentence.islower()
+        and "." not in sentence
+        and "," not in sentence
+        and len(words) > 6
+    ):
+        return "rewrite"
+
+    # default path
+    return "grammar"
+    
 def rewrite_text():
     print("REWRITE TRIGGERED")
 
@@ -119,6 +172,8 @@ def rewrite_text():
         time.sleep(0.35)
 
         original_text = pyperclip.paste()
+        text_stripped = original_text.strip()
+        is_single_word = len(text_stripped.split()) == 1
 
         if not original_text or not original_text.strip():
             print("No text selected.")
@@ -130,21 +185,35 @@ def rewrite_text():
         # Update last used timestamp
         LAST_USED_FILE.write_text(str(time.time()))
 
-        prompt = PROMPT_TEMPLATE.format(original_text)
+        sentences = split_sentences(original_text)
 
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False
-            },
-            timeout=60
-        )
+        corrected_sentences = []
+        any_changes = False
 
-        rewritten = response.json()["response"].strip()
+        for sentence in sentences:
+            corrected, changed = correct_sentence(sentence)
+            corrected_sentences.append(corrected)
+            if changed:
+                any_changes = True
 
-        # Put rewritten text on clipboard
+        # rebuild paragraph
+        rewritten = " ".join(corrected_sentences)
+
+        if not any_changes:
+            print("NO_CHANGE")
+            rewritten = original_text
+        else:
+            print("CHANGED")
+
+                # Model says "no changes needed" -> paste original text back
+        if rewritten == "<<NO_CHANGE>>":
+                    print("NO_CHANGE")
+                    rewritten = original_text
+        else:
+            # Optional safety: if the model returns empty for any reason, don't clobber text
+            if not rewritten.strip():
+                rewritten = original_text
+
         pyperclip.copy(rewritten)
 
         # Give macOS time to register clipboard change
