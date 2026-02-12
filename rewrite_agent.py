@@ -8,7 +8,8 @@ from pathlib import Path
 LAST_USED_FILE = Path.home() / ".ollama_last_used"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "mistral"
+#MODEL = "mistral"
+MODEL = "mistral:instruct"
 OLLAMA_BIN = "/opt/homebrew/bin/ollama"
 
 PROMPT_TEMPLATE = """
